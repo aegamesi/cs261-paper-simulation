@@ -190,13 +190,14 @@ class User:
         self.pdp = pdp
         self.sdp = sdp
 
-    def do_sealed_vote(self, vote):
+    def prepare_sealed_vote(self, vote):
         self.vote = vote
         self.commitment_key = nacl.utils.random(64)
         self.vote_counter += 1
-
         commitment = blake2b(obj2bytes(self.vote), key=self.commitment_key)
         self.sealed_vote = (commitment, self.vote_counter, self.pdp)
+
+    def do_sealed_vote(self):
         self.receipt = vote_tallier.do_sealed_vote(self.sealed_vote)
 
     def do_validate_ledger(self):
@@ -259,11 +260,16 @@ if __name__ == '__main__':
     print("did distance verification decryption/verification (by device) (PARALLEL) in {}".format(t.elapsed))
 
 
-
     # phase: sealed_vote
     with Timer() as t:
+        user.prepare_sealed_vote('eli')
+    for user in users:
+        user.prepare_sealed_vote('eli')
+    print("prepared sealed votes (PARALLEL) in {}".format(t.elapsed))
+
+    with Timer() as t:
         for user in users:
-            user.do_sealed_vote('eli')
+            user.do_sealed_vote()
     print("did {} sealed votes in {}".format(len(users), t.elapsed))
 
     # phase: validate ledger === "done in parallel"
