@@ -8,12 +8,9 @@ import nacl.bindings
 
 from contexttimer import Timer
 
+import sys
 import pickle
 from base64 import b64encode, b64decode
-
-
-NUM_USERS = 1000
-DB_BITS = 256
 
 #### utils:
 def validate_pdp(pdp, good_voting_group_hash):
@@ -89,20 +86,22 @@ class KeyAuthority:
         # derive secret key from db_challenge/db_response
         secret_key = db_response  # TODO not quite right but ok
 
-        user_public_key = self.db_to_pk.get(secret_key)
-        if user_public_key is None:
-            raise Exception('KeyAuthority: could not find DB Key -> PK mapping')
-
-        user_public_key_str = get_key_string(user_public_key)
-        if user_public_key_str not in voting_group:
-            raise Exception('KeyAuthority: user PK not in voting group')
-
         # kinda shady caching -- *should* return some value that the distance verifier can pass
         if self._cached_voting_group_hash is not None:
             voting_group_hash = self._cached_voting_group_hash
         else:
             voting_group_hash = makehash(voting_group)
+            self._cached_voting_group = set(voting_group)
             self._cached_voting_group_hash = voting_group_hash
+
+        # verification
+        user_public_key = self.db_to_pk.get(secret_key)
+        if user_public_key is None:
+            raise Exception('KeyAuthority: could not find DB Key -> PK mapping')
+
+        user_public_key_str = get_key_string(user_public_key)
+        if user_public_key_str not in self._cached_voting_group:
+            raise Exception('KeyAuthority: user PK not in voting group')
         
         user_token = makehash((epoch, voting_group_hash, user_public_key_str, secret_key))
         pdp = self.signing_key.sign(obj2bytes((distance_result, voting_group_hash, user_token)))
@@ -178,9 +177,10 @@ class User:
         self.voting_group_hash = cachehash
 
     def do_distance_verification(self):
-        esdp = distance_verifier.request_distance_verification(self, epoch)
+        self.esdp = distance_verifier.request_distance_verification(self, epoch)
 
-        sdp = SealedBox(self.private_key).decrypt(esdp)
+    def do_distance_verification_decryption(self):
+        sdp = SealedBox(self.private_key).decrypt(self.esdp)
         sdp = to_signed_message(sdp)
         key_authority.verify_key.verify(sdp)
 
@@ -212,57 +212,73 @@ class User:
 
 
 #####################
+if __name__ == '__main__':
+    NUM_USERS = int(sys.argv[1])
+    DB_BITS = 256
+    print("Running with {} users".format(NUM_USERS))
 
-key_authority = KeyAuthority()
-distance_verifier = DistanceVerifier()
-vote_tallier = VoteTallier()
+    key_authority = KeyAuthority()
+    distance_verifier = DistanceVerifier()
+    vote_tallier = VoteTallier()
 
-# Generate Devices
-users = []
-with Timer() as t:
-    for i in range(NUM_USERS):
-        user = key_authority.make_device(100.0)
-        users.append(user)
-print("created {} devices in {}".format(len(users), t.elapsed))
+    # Generate Devices
+    users = []
+    with Timer() as t:
+        for i in range(NUM_USERS):
+            user = key_authority.make_device(100.0)
+            users.append(user)
+    print("created {} devices in {}".format(len(users), t.elapsed))
 
-# set parameters
-max_distance = 500.0
-epoch = 1234
-voting_group = sorted([user.public_key_str for user in users])
+    print("========================================================")
 
-with Timer() as t:
-    distance_verifier.set_voting_group(voting_group)
-    vote_tallier.set_voting_group(voting_group)
-    cachehash = makehash(voting_group)
+    # set parameters
+    max_distance = 500.0
+    epoch = 1234
+    voting_group = sorted([user.public_key_str for user in users])
+
+    with Timer() as t:
+        distance_verifier.set_voting_group(voting_group)
+        vote_tallier.set_voting_group(voting_group)
+        cachehash = makehash(voting_group)
+        for user in users:
+            user.set_voting_group(voting_group, cachehash)
+    print("set voting group (PARALLEL) in {}".format(t.elapsed))
+
+    # phase: distance verification
+    with Timer() as t:
+        for user in users:
+            user.do_distance_verification()
+    print("did {} distance verification in {}".format(len(users), t.elapsed))
+
+    # decrypt and verify the ESDP
+    with Timer() as t:
+        user.do_distance_verification_decryption()
+    # and now do the rest not timed
     for user in users:
-        user.set_voting_group(voting_group, cachehash)
-print("set voting group (PARALLEL) in {}".format(t.elapsed))
+        user.do_distance_verification_decryption()
+    print("did distance verification decryption/verification (by device) (PARALLEL) in {}".format(t.elapsed))
 
-# phase: distance verification
-with Timer() as t:
-    for user in users:
-        user.do_distance_verification()
-print("did {} distance verification in {}".format(len(users), t.elapsed))
 
-# phase: sealed_vote
-with Timer() as t:
-    for user in users:
-        user.do_sealed_vote('eli')
-print("did {} sealed votes in {}".format(len(users), t.elapsed))
 
-# phase: validate ledger === "done in parallel"
-with Timer() as t:
-    user.do_validate_ledger()
-print("validated ledgers (PARALLEL) in  {}".format(t.elapsed))
+    # phase: sealed_vote
+    with Timer() as t:
+        for user in users:
+            user.do_sealed_vote('eli')
+    print("did {} sealed votes in {}".format(len(users), t.elapsed))
 
-# phase: unseal vote
-with Timer() as t:
-    for user in users:
-        user.do_unseal_vote()
-print("unsealed {} votes in  {}".format(len(users), t.elapsed))
+    # phase: validate ledger === "done in parallel"
+    with Timer() as t:
+        user.do_validate_ledger()
+    print("validated ledgers (PARALLEL) in  {}".format(t.elapsed))
 
-# phase: tally!
-with Timer() as t:
-    tally = tally_votes()
-    print(tally)
-print("tallied (PARALLEL) in {}".format(t.elapsed))
+    # phase: unseal vote
+    with Timer() as t:
+        for user in users:
+            user.do_unseal_vote()
+    print("unsealed {} votes in  {}".format(len(users), t.elapsed))
+
+    # phase: tally!
+    with Timer() as t:
+        tally = tally_votes()
+        print(tally)
+    print("tallied (PARALLEL) in {}".format(t.elapsed))
