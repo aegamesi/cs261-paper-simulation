@@ -12,7 +12,7 @@ import pickle
 from base64 import b64encode, b64decode
 
 
-NUM_USERS = 10000
+NUM_USERS = 1000
 DB_BITS = 256
 
 #### utils:
@@ -76,6 +76,9 @@ class KeyAuthority:
         # self.pk_to_db = {}
         self.db_to_pk = {}
 
+        self._cached_voting_group = None
+        self._cached_voting_group_hash = None
+
     def make_device(self, distance):
         user = User(distance)
         # self.pk_to_db[user.public_key_str] = user.db_key
@@ -94,9 +97,14 @@ class KeyAuthority:
         if user_public_key_str not in voting_group:
             raise Exception('KeyAuthority: user PK not in voting group')
 
-        voting_group_hash = makehash(voting_group)
+        # kinda shady caching -- *should* return some value that the distance verifier can pass
+        if self._cached_voting_group_hash is not None:
+            voting_group_hash = self._cached_voting_group_hash
+        else:
+            voting_group_hash = makehash(voting_group)
+            self._cached_voting_group_hash = voting_group_hash
         
-        user_token = makehash((epoch, voting_group, user_public_key_str, secret_key))
+        user_token = makehash((epoch, voting_group_hash, user_public_key_str, secret_key))
         pdp = self.signing_key.sign(obj2bytes((distance_result, voting_group_hash, user_token)))
         sdp = self.signing_key.sign(obj2bytes((user_public_key_str, pdp)))
         esdp = SealedBox(user_public_key).encrypt(sdp)
@@ -228,7 +236,7 @@ with Timer() as t:
     cachehash = makehash(voting_group)
     for user in users:
         user.set_voting_group(voting_group, cachehash)
-print("set voting group in {}".format(t.elapsed))
+print("set voting group (PARALLEL) in {}".format(t.elapsed))
 
 # phase: distance verification
 with Timer() as t:
@@ -257,4 +265,4 @@ print("unsealed {} votes in  {}".format(len(users), t.elapsed))
 with Timer() as t:
     tally = tally_votes()
     print(tally)
-print("tallied in {}".format(t.elapsed))
+print("tallied (PARALLEL) in {}".format(t.elapsed))
