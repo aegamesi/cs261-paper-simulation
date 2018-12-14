@@ -135,26 +135,28 @@ class VoteTallier:
 
         self.sealed_votes = {}  # user token -> sealed_vote
         self.unsealed_votes = {}  # user token -> vote
+        self._sealed_vote_cache = {}  # commitment -> user token
 
     def set_voting_group(self, group):
         self.voting_group = group
         self.voting_group_hash = makehash(voting_group)
 
     def do_sealed_vote(self, sealed_vote):
-        user_token = validate_pdp(sealed_vote[2], self.voting_group_hash)
+        commitment, vote_counter, pdp = sealed_vote
+        user_token = validate_pdp(pdp, self.voting_group_hash)
         receipt = self.signing_key.sign(obj2bytes(sealed_vote))
         self.sealed_votes[user_token] = sealed_vote
+        self._sealed_vote_cache[commitment] = user_token
         return receipt
 
     def do_unseal_vote(self, commitment_key, vote):
         commitment = blake2b(obj2bytes(vote), key=commitment_key)
 
-        for token, sealed_vote in self.sealed_votes.items():
-            if sealed_vote[0] == commitment:
-                self.unsealed_votes[token] = (commitment_key, vote)
-                return
-
-        raise Exception('VoteTallier: unsealed commitment not found in sealed votes')
+        user_token = self._sealed_vote_cache.get(commitment)
+        if user_token is None:
+            raise Exception('VoteTallier: unsealed commitment not found in sealed votes')
+        else:
+            self.unsealed_votes[user_token] = (commitment_key, vote)        
 
 class User:
     def __init__(self, distance):
